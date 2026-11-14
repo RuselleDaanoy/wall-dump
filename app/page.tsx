@@ -33,7 +33,7 @@ function Detail({ label, value }: { label: string; value: React.ReactNode }) {
 }
 
 export default function Home() {
-  const { posts, totalPosts, isLoading, error, status, addPost } = useWallFeed();
+  const { posts, totalPosts, isLoading, error, status, addPost, deletePost } = useWallFeed();
   const connection = STATUS[status];
 
   const voices = useMemo(
@@ -156,7 +156,7 @@ export default function Home() {
 
           <div className="space-y-5 md:col-span-8">
             <WallComposer onPosted={addPost} />
-            <WallFeed posts={posts} isLoading={isLoading} error={error} />
+            <WallFeed posts={posts} isLoading={isLoading} error={error} onDelete={deletePost} />
           </div>
         </div>
       </main>

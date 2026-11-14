@@ -15,7 +15,7 @@ Built as a deliberate throwback to the 2008 Facebook Wall, redesigned with a cle
 Most social feeds decide what you see for you. This one doesn't. `the wall` is a small, single-page app for a group of people who want one shared, reverse-chronological stream:
 
 - **Write** up to 280 characters under your name.
-- **Attach** one photo (JPG, PNG, GIF or WebP, up to 5 MB).
+- **Attach** one photo (JPG, PNG, GIF or WebP). Large photos are resized to 1600px and compressed in the browser before upload.
 - **Watch** new posts from anyone else arrive live, without refreshing.
 - **See** honest totals: how many posts exist, how many distinct voices are in the feed, and how many photos have been shared.
 
@@ -70,9 +70,71 @@ docs/
 
 A thin cobalt header (`#3b5998`) sits over a light canvas (`#f4f5f7`). Cards use 1px `#d3d6db` borders, 2px corners at most, and no gradients or heavy shadows. Author names are cobalt, timestamps and metadata are quiet gray, and the layout is a 12-column grid on desktop that collapses to one column on mobile.
 
+## Getting started
+
+### 1. Install
+
+```bash
+npm install
+```
+
+### 2. Configure the environment
+
+Create `.env` (or `.env.local`) with your Supabase project credentials:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+```
+
+### 3. Create the database table
+
+```sql
+create table public.posts (
+  id uuid primary key default gen_random_uuid(),
+  author_name text not null,
+  message text not null,
+  image_url text,
+  created_at timestamptz not null default now()
+);
+
+alter table public.posts enable row level security;
+
+create policy "Posts are publicly readable"
+  on public.posts for select using (true);
+
+create policy "Anyone can post"
+  on public.posts for insert with check (true);
+
+-- Enable Realtime for the wall
+alter publication supabase_realtime add table public.posts;
+```
+
+### 4. Create the photo bucket (optional)
+
+In Supabase Storage, create a **public** bucket named `wall-photos`. Uploads go to `YYYY-MM-DD/<uuid>.<ext>` and are served from the bucket's public URL. Without this bucket the app still works — posts are simply text-only.
+
+### 5. Run it
+
+```bash
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+## Scripts
+
+| Command | Purpose |
+| --- | --- |
+| `npm run dev` | Start the development server |
+| `npm run build` | Production build |
+| `npm run start` | Serve the production build |
+| `npm run lint` | Run ESLint |
+
 ## Notes and limits
 
 - The feed loads the latest **50 posts**; older posts remain in the database but are not rendered.
 - **Voices** and **Photos** are counts within the loaded feed, while **Posts** is the exact table count.
 - There is no authentication: anyone with the anon key can read and insert. That is intentional for a small private wall, but it is not suitable for sensitive content.
-- Deleting and editing posts are not implemented yet.
+- Posts can be deleted from the feed; the uploaded photo file is left in Storage.
+- Editing posts is not implemented yet.

@@ -5,9 +5,65 @@ import { AlertCircle, ImagePlus, Loader2, X } from "lucide-react";
 import { isSupabaseConfigured, supabase, type Post } from "@/lib/supabase";
 
 const MAX_CHARS = 280;
-const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 1600;
+const IMAGE_QUALITY = 0.85;
 const DEFAULT_AUTHOR = "Ruselle Daanoy";
 const BUCKET = "wall-photos";
+
+function extensionFor(type: string): string {
+  if (type === "image/png") return "png";
+  if (type === "image/webp") return "webp";
+  if (type === "image/gif") return "gif";
+  return "jpg";
+}
+
+/**
+ * Shrinks large photos to a sensible size before upload. Animated GIFs and
+ * images that are already small are sent untouched, and any canvas/decoder
+ * failure falls back to the original file.
+ */
+async function prepareImage(file: File): Promise<File> {
+  if (file.type === "image/gif" || file.size <= 600 * 1024) return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const largestSide = Math.max(bitmap.width, bitmap.height);
+    const scale = Math.min(1, MAX_IMAGE_DIMENSION / largestSide);
+
+    if (scale === 1 && file.size <= MAX_UPLOAD_BYTES) {
+      bitmap.close();
+      return file;
+    }
+
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+
+    const context = canvas.getContext("2d");
+    if (!context) {
+      bitmap.close();
+      return file;
+    }
+
+    context.fillStyle = "#ffffff";
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    bitmap.close();
+
+    const blob = await new Promise<Blob | null>((resolve) => {
+      canvas.toBlob(resolve, "image/jpeg", IMAGE_QUALITY);
+    });
+
+    if (!blob || blob.size >= file.size) return file;
+
+    const name = file.name.replace(/\.[^.]+$/, "") || "photo";
+    return new File([blob], `${name}.jpg`, { type: "image/jpeg" });
+  } catch {
+    return file;
+  }
+}
 
 interface WallComposerProps {
   onPosted?: (post: Post) => void;
@@ -55,8 +111,8 @@ export default function WallComposer({ onPosted }: WallComposerProps) {
       return;
     }
 
-    if (file.size > MAX_IMAGE_BYTES) {
-      setError("That image is larger than 5 MB. Try a smaller one.");
+    if (file.size > MAX_SOURCE_BYTES) {
+      setError("That image is larger than 25 MB. Try a smaller one.");
       event.target.value = "";
       return;
     }
@@ -66,9 +122,11 @@ export default function WallComposer({ onPosted }: WallComposerProps) {
     setPreview(URL.createObjectURL(file));
   }
 
-  async function uploadImage(file: File): Promise<string | null> {
+  async function uploadImage(
+    file: File,
+  ): Promise<{ url: string | null; error: string | null }> {
     try {
-      const extension = file.name.split(".").pop()?.toLowerCase() || "jpg";
+      const extension = extensionFor(file.type);
       const date = new Date().toISOString().slice(0, 10);
       const path = `${date}/${crypto.randomUUID()}.${extension}`;
 
@@ -80,13 +138,17 @@ export default function WallComposer({ onPosted }: WallComposerProps) {
           contentType: file.type || "image/jpeg",
         });
 
-      if (uploadError) return null;
+      if (uploadError) return { url: null, error: uploadError.message };
 
       const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
-      return data.publicUrl || null;
-    } catch {
+      if (!data.publicUrl) return { url: null, error: "No public URL was returned" };
+      return { url: data.publicUrl, error: null };
+    } catch (error) {
       // Storage may not be configured; the post should still go through.
-      return null;
+      return {
+        url: null,
+        error: error instanceof Error ? error.message : "Storage request failed",
+      };
     }
   }
 
@@ -106,11 +168,18 @@ export default function WallComposer({ onPosted }: WallComposerProps) {
 
     try {
       let imageUrl: string | null = null;
-      let uploadFailed = false;
+      let uploadError: string | null = null;
 
       if (image) {
-        imageUrl = await uploadImage(image);
-        uploadFailed = imageUrl === null;
+        const prepared = await prepareImage(image);
+
+        if (prepared.size > MAX_UPLOAD_BYTES) {
+          uploadError = "the photo is still larger than 5 MB after optimizing";
+        } else {
+          const upload = await uploadImage(prepared);
+          imageUrl = upload.url;
+          uploadError = upload.error;
+        }
       }
 
       const { data, error: insertError } = await supabase
@@ -132,8 +201,10 @@ export default function WallComposer({ onPosted }: WallComposerProps) {
       setMessage("");
       clearImage();
 
-      if (uploadFailed) {
-        setNotice("Your photo couldn't be uploaded, so the post was shared without it.");
+      if (uploadError) {
+        setNotice(
+          `Your photo couldn't be uploaded (${uploadError}), so the post was shared without it.`,
+        );
       }
     } catch {
       setError("Couldn't reach the wall. Check your connection and try again.");
@@ -206,7 +277,7 @@ export default function WallComposer({ onPosted }: WallComposerProps) {
             <p className="pt-1 text-[11px] leading-relaxed text-[#6b7280]">
               Photo attached.
               <br />
-              <span className="text-[#9aa0a8]">It will appear beneath your message.</span>
+              <span className="text-[#9aa0a8]">Large photos are resized automatically.</span>
             </p>
           </div>
         ) : null}

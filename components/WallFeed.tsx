@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { format, formatDistanceToNow } from "date-fns";
-import { AlertTriangle, MessageSquareDashed } from "lucide-react";
+import { AlertTriangle, MessageSquareDashed, Trash2 } from "lucide-react";
 import { isSupabaseConfigured, supabase, type Post } from "@/lib/supabase";
 
 const MAX_POSTS = 50;
@@ -40,6 +40,13 @@ export function useWallFeed() {
     seenIds.current.add(incoming.id);
     setPosts((current) => sortPosts([incoming, ...current]));
     setTotalPosts((current) => (current === null ? null : current + 1));
+  }, []);
+
+  const removeIncoming = useCallback((id: string) => {
+    if (!id || !seenIds.current.delete(id)) return;
+
+    setPosts((current) => current.filter((post) => post.id !== id));
+    setTotalPosts((current) => (current === null ? null : Math.max(0, current - 1)));
   }, []);
 
   useEffect(() => {
@@ -91,6 +98,13 @@ export function useWallFeed() {
           addIncoming(payload.new as Post);
         },
       )
+      .on(
+        "postgres_changes",
+        { event: "DELETE", schema: "public", table: "posts" },
+        (payload) => {
+          removeIncoming((payload.old as Partial<Post>).id ?? "");
+        },
+      )
       .subscribe((subscriptionStatus) => {
         if (cancelled) return;
 
@@ -109,7 +123,7 @@ export function useWallFeed() {
       cancelled = true;
       void supabase.removeChannel(channel);
     };
-  }, [addIncoming]);
+  }, [addIncoming, removeIncoming]);
 
   const addPost = useCallback(
     (post: Post) => {
@@ -119,7 +133,26 @@ export function useWallFeed() {
     [addIncoming],
   );
 
-  return { posts, totalPosts, isLoading, status, error, addPost };
+  const deletePost = useCallback(
+    async (id: string): Promise<string | null> => {
+      const { data, error: deleteError } = await supabase
+        .from("posts")
+        .delete()
+        .eq("id", id)
+        .select("id");
+
+      if (deleteError) return deleteError.message;
+      if (!data?.length) {
+        return "The database blocked the delete. Add the delete policy from the README.";
+      }
+
+      removeIncoming(id);
+      return null;
+    },
+    [removeIncoming],
+  );
+
+  return { posts, totalPosts, isLoading, status, error, addPost, deletePost };
 }
 
 function initials(name: string): string {
@@ -129,8 +162,30 @@ function initials(name: string): string {
   return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
 }
 
-function PostCard({ post }: { post: Post }) {
+interface PostCardProps {
+  post: Post;
+  onDelete: (id: string) => Promise<string | null>;
+}
+
+function PostCard({ post, onDelete }: PostCardProps) {
   const createdAt = new Date(post.created_at);
+  const [confirming, setConfirming] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  async function handleDelete() {
+    setIsDeleting(true);
+    setDeleteError(null);
+
+    const failure = await onDelete(post.id);
+
+    setIsDeleting(false);
+    if (failure) {
+      setDeleteError(failure);
+      return;
+    }
+    setConfirming(false);
+  }
 
   return (
     <article className="border border-[#d3d6db] bg-white">
@@ -147,13 +202,27 @@ function PostCard({ post }: { post: Post }) {
             <h3 className="min-w-0 break-words text-[13px] font-semibold leading-snug text-[#3b5998]">
               {post.author_name}
             </h3>
-            <time
-              dateTime={post.created_at}
-              title={format(createdAt, "PPpp")}
-              className="shrink-0 text-[11px] text-[#8a8f98]"
-            >
-              {formatDistanceToNow(createdAt, { addSuffix: true })}
-            </time>
+            <div className="flex shrink-0 items-center gap-2">
+              <time
+                dateTime={post.created_at}
+                title={format(createdAt, "PPpp")}
+                className="text-[11px] text-[#8a8f98]"
+              >
+                {formatDistanceToNow(createdAt, { addSuffix: true })}
+              </time>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirming(true);
+                  setDeleteError(null);
+                }}
+                aria-label={`Delete post by ${post.author_name}`}
+                title="Delete post"
+                className="text-[#c3c7cd] transition-colors hover:text-[#b91c1c] focus:outline-none focus-visible:text-[#b91c1c]"
+              >
+                <Trash2 size={12} strokeWidth={1.75} />
+              </button>
+            </div>
           </div>
 
           <p className="mt-1.5 whitespace-pre-wrap break-words text-[14px] leading-relaxed text-[#1d2129]">
@@ -169,6 +238,40 @@ function PostCard({ post }: { post: Post }) {
                 loading="lazy"
                 className="block max-h-[440px] w-full object-cover"
               />
+            </div>
+          ) : null}
+
+          {confirming ? (
+            <div className="mt-3 border-t border-[#e2e8f0] pt-2.5">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-[11px] text-[#6b7280]">
+                  Delete this post? This can&apos;t be undone.
+                </p>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setConfirming(false)}
+                    disabled={isDeleting}
+                    className="border border-[#d3d6db] px-2.5 py-1 text-[11px] text-[#4b5563] transition-colors hover:bg-[#f4f5f7] disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleDelete}
+                    disabled={isDeleting}
+                    className="inline-flex items-center gap-1.5 bg-[#b91c1c] px-2.5 py-1 text-[11px] font-medium text-white transition-colors hover:bg-[#991b1b] disabled:cursor-not-allowed disabled:bg-[#d9a3a3]"
+                  >
+                    <Trash2 size={11} strokeWidth={2} />
+                    {isDeleting ? "Deleting" : "Delete"}
+                  </button>
+                </div>
+              </div>
+              {deleteError ? (
+                <p role="alert" className="mt-2 text-[11px] text-[#a12a2a]">
+                  {deleteError}
+                </p>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -199,9 +302,10 @@ interface WallFeedProps {
   posts: Post[];
   isLoading: boolean;
   error: string | null;
+  onDelete: (id: string) => Promise<string | null>;
 }
 
-export default function WallFeed({ posts, isLoading, error }: WallFeedProps) {
+export default function WallFeed({ posts, isLoading, error, onDelete }: WallFeedProps) {
   return (
     <section aria-labelledby="wall-heading" className="space-y-3">
       <div className="flex items-baseline justify-between">
@@ -246,7 +350,7 @@ export default function WallFeed({ posts, isLoading, error }: WallFeedProps) {
       ) : (
         <div className="space-y-3">
           {posts.map((post) => (
-            <PostCard key={post.id} post={post} />
+            <PostCard key={post.id} post={post} onDelete={onDelete} />
           ))}
         </div>
       )}
